@@ -56,24 +56,32 @@ class ModelPathwayAnalyzer:
         print(f"📡 Registered hooks on {layer_counter} main transformer layers")
 
     def get_thought_embeddings(self, question: str) -> np.ndarray:
-        """Get layer-wise activations as thought trajectory"""
-        # Reset cache with proper initialization
+        """Get layer-wise activations during response generation"""
         self.activation_cache = [None] * len(self.activation_cache)
         
         messages = [{"role": "user", "content": question}]
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        with torch.no_grad():
-            _ = self.model(**inputs)
         
-        # Verify all activations were captured
+        # Generate response while capturing activations
+        with torch.no_grad():
+            self.model.generate(
+                inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=100,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+        
         if any(x is None for x in self.activation_cache):
             raise ValueError(f"Missing activations in {self.activation_cache.count(None)} layers")
             
         return torch.stack(self.activation_cache).numpy()
 
-    def visualize_thought_space(self, embeddings: np.ndarray, category: str):
+    def visualize_thought_space(self, embeddings: np.ndarray, category: str, output_dir: pathlib.Path):
         """Visualize activations using UMAP"""
         print(f"🎨 Generating visualization for {category}...")
         
@@ -82,7 +90,12 @@ class ModelPathwayAnalyzer:
             embeddings = embeddings.squeeze(1)  # Shape: (layers, hidden_dim)
         
         # Reduce dimensionality
-        reducer = UMAP(n_components=2, random_state=42)
+        reducer = UMAP(
+            n_components=2, 
+            random_state=42,
+            n_jobs=-1,
+            transform_seed=42
+        )
         embeddings_2d = reducer.fit_transform(embeddings)
         
         plt.figure(figsize=(10, 8))
@@ -92,9 +105,9 @@ class ModelPathwayAnalyzer:
         plt.title(f"Thought Trajectory: {category}\nLayer Progression: Cool → Warm")
         plt.colorbar(label="Layer Depth")
         filename = f"thought_trajectory_{category}.png"
-        plt.savefig(filename)
+        plt.savefig(output_dir / filename)
         plt.close()
-        print(f"💾 Saved visualization: {filename}")
+        print(f"💾 Saved visualization: {output_dir / filename}")
 
 def load_questions() -> Dict[str, List[str]]:
     """Load questions from JSON file"""
@@ -117,6 +130,12 @@ def load_questions() -> Dict[str, List[str]]:
 
 def main():
     print("🚀 Starting neural pathway analysis")
+    
+    # Create timestamped results directory
+    results_dir = pathlib.Path("results") / datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Output directory: {results_dir}")
+    
     analyzer = ModelPathwayAnalyzer()
     
     try:
@@ -138,7 +157,7 @@ def main():
             try:
                 print(f"   🔎 Analyzing question {q_idx}/{len(category_questions)}: {question[:50]}...")
                 embeddings = analyzer.get_thought_embeddings(question)
-                analyzer.visualize_thought_space(embeddings, category)
+                analyzer.visualize_thought_space(embeddings, category, output_dir=results_dir)
                 all_embeddings.append(embeddings)
                 categories.append(category)
                 total_processed += 1
@@ -149,8 +168,8 @@ def main():
     if all_embeddings:
         print(f"🧩 Combining {len(all_embeddings)} question embeddings")
         combined_embeddings = np.concatenate(all_embeddings)
-        analyzer.visualize_thought_space(combined_embeddings, "All_Categories")
-        print(f"📈 Saved combined visualization: thought_trajectory_All_Categories.png")
+        analyzer.visualize_thought_space(combined_embeddings, "All_Categories", output_dir=results_dir)
+        print(f"📈 Saved combined visualization: {results_dir}/thought_trajectory_All_Categories.png")
     else:
         print("⚠️ No valid embeddings generated - nothing to visualize")
     
