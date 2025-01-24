@@ -1,5 +1,6 @@
 """
-This script attempts to analyze the internal neural pathways of the Deepseek model (https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B)
+This script attempts to analyze the internal neural pathways of a Deepseek model 
+(https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen1.5B)
 during different types of reasoning tasks. The goal is to understand which parts
 of the network are activated for different cognitive tasks.
 """
@@ -13,191 +14,137 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
+from umap import UMAP
 
 class ModelPathwayAnalyzer:
     def __init__(self, model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"):
-        """Initialize the pathway analyzer with DeepSeek model."""
+        print(f"\n🔧 Initializing analyzer with model: {model_name}")
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
-        self.activation_cache = {}
-        self.attention_patterns = {}
+        self.activation_cache = []
         self.register_hooks()
+        print(f"✅ Model loaded on device: {self.model.device}")
         
     def register_hooks(self):
-        """Register forward hooks to capture activations at different layers."""
-        def hook_fn(module, input, output, layer_name):
-            self.activation_cache[layer_name] = output.detach()
+        """Register hooks to capture layer activations efficiently"""
+        print("🔌 Registering activation hooks...")
         
-        # Register hooks for transformer layers
-        for name, module in self.model.named_modules():
-            if "layers" in name:  # This catches the transformer layers
-                if "attention" in name:
-                    module.register_forward_hook(
-                        lambda m, i, o, name=name: hook_fn(m, i, o, f"attention_{name}")
-                    )
-                elif "mlp" in name:
-                    module.register_forward_hook(
-                        lambda m, i, o, name=name: hook_fn(m, i, o, f"mlp_{name}")
-                    )
-    
-    def analyze_pathway(self, question: str, category: str) -> Dict:
-        """Analyze the neural pathway for a given question."""
-        # Clear previous activations
-        self.activation_cache.clear()
+        def hook_fn(module, input, output, layer_idx):
+            self.activation_cache[layer_idx] = output[0].mean(dim=1).detach().cpu()
         
-        # Format input using chat template
+        # Register hooks only on every 4th layer to reduce computation
+        self.selected_layers = []
+        for idx, (name, module) in enumerate(self.model.named_modules()):
+            if "layers" in name and idx % 4 == 0:
+                self.selected_layers.append(name)
+                module.register_forward_hook(
+                    lambda m, i, o, idx=idx: hook_fn(m, i, o, idx//4)
+                )
+        
+        self.activation_cache = [None] * len(self.selected_layers)
+        print(f"📡 Registered hooks on {len(self.selected_layers)} layers")
+
+    def get_thought_embeddings(self, question: str) -> np.ndarray:
+        """Get layer-wise activations as thought trajectory"""
+        self.activation_cache = [None] * len(self.selected_layers)
+        
         messages = [{"role": "user", "content": question}]
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         
-        # Tokenize and run through model
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
-            outputs = self.model(**inputs)
+            _ = self.model(**inputs)
         
-        # Collect activation patterns
-        pathway_data = {
-            'layer_activations': {
-                layer: activation.mean().item() 
-                for layer, activation in self.activation_cache.items()
-            },
-            'attention_patterns': {
-                layer: activation.mean(dim=(0, 1)).cpu().numpy().tolist()
-                for layer, activation in self.activation_cache.items()
-                if 'attention' in layer
-            },
-            'category': category,
-            'question': question
-        }
+        # Stack layer activations into a thought trajectory
+        return torch.stack(self.activation_cache).numpy()
+
+    def visualize_thought_space(self, embeddings: np.ndarray, category: str):
+        """Visualize activations using UMAP"""
+        print(f"🎨 Generating visualization for {category}...")
+        from umap import UMAP
         
-        return pathway_data
-    
-    def compare_pathways(self, category1: str, category2: str) -> Dict:
-        """Compare neural pathways between two categories of questions."""
-        cat1_activations = [data['layer_activations'] 
-                          for data in self.pathway_analyses[category1]]
-        cat2_activations = [data['layer_activations'] 
-                          for data in self.pathway_analyses[category2]]
+        # Reduce dimensionality
+        reducer = UMAP(n_components=2, random_state=42)
+        embeddings_2d = reducer.fit_transform(embeddings)
         
-        comparison = {
-            'activation_differences': {},
-            'attention_pattern_differences': {}
-        }
-        
-        # Compare average activations
-        for layer in cat1_activations[0].keys():
-            cat1_mean = np.mean([act[layer] for act in cat1_activations])
-            cat2_mean = np.mean([act[layer] for act in cat2_activations])
-            comparison['activation_differences'][layer] = cat1_mean - cat2_mean
-            
-        return comparison
-    
-    def visualize_pathway(self, pathway_data: Dict):
-        """Visualize the neural pathway analysis."""
-        plt.figure(figsize=(15, 10))
-        
-        # Plot activation patterns
-        plt.subplot(2, 1, 1)
-        activations = list(pathway_data['layer_activations'].values())
-        layer_names = list(pathway_data['layer_activations'].keys())
-        sns.barplot(x=list(range(len(activations))), y=activations)
-        plt.xticks(range(len(layer_names)), layer_names, rotation=45)
-        plt.title(f"Layer Activations for Category: {pathway_data['category']}")
-        
-        # Plot attention patterns if available
-        if pathway_data['attention_patterns']:
-            plt.subplot(2, 1, 2)
-            attention_matrix = np.array(list(pathway_data['attention_patterns'].values()))
-            sns.heatmap(attention_matrix, cmap='viridis')
-            plt.title("Attention Patterns Across Layers")
-        
-        plt.tight_layout()
-        plt.show()
+        plt.figure(figsize=(10, 8))
+        plt.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], 
+                   c=np.linspace(0, 1, len(embeddings_2d)),
+                   cmap='viridis', alpha=0.7)
+        plt.title(f"Thought Trajectory: {category}\nLayer Progression: Cool → Warm")
+        plt.colorbar(label="Layer Depth")
+        filename = f"thought_trajectory_{category}.png"
+        plt.savefig(filename)
+        plt.close()
+        print(f"💾 Saved visualization: {filename}")
 
 def load_questions() -> Dict[str, List[str]]:
-    """Load questions from existing results"""
-    results_dir = pathlib.Path("results")
-    if not results_dir.exists():
-        return {}
-        
-    # Get most recent results
-    run_dirs = [d for d in results_dir.iterdir() if d.is_dir()]
-    if not run_dirs:
-        return {}
-        
-    last_run_dir = max(run_dirs)
-    response_file = last_run_dir / "responses_intermediate.json"
+    """Load questions from JSON file"""
+    print("\n⏳ Loading questions.json...")
+    questions_file = pathlib.Path("questions.json")
     
-    try:
-        with open(response_file, 'r') as f:
-            data = json.load(f)
-            return {category: list(qa_pairs.keys()) 
-                   for category, qa_pairs in data.items()}
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
+    if not questions_file.exists():
+        raise FileNotFoundError(f"Questions file not found at {questions_file}")
+    
+    with open(questions_file, 'r') as f:
+        data = json.load(f)
+    
+    # Validate structure
+    if not isinstance(data, dict) or not all(isinstance(v, list) for v in data.values()):
+        raise ValueError("Invalid questions.json format. Expected {category: [questions]}")
+    
+    total_questions = sum(len(v) for v in data.values())
+    print(f"✅ Loaded {len(data)} categories with {total_questions} total questions")
+    return data
 
 def main():
-    # Initialize analyzer
+    print("🚀 Starting neural pathway analysis")
     analyzer = ModelPathwayAnalyzer()
     
-    # Define some test categories and questions if no previous questions exist
-    default_questions = {
-        "logical_reasoning": [
-            "If all A are B, and all B are C, what can we conclude about A and C?",
-            "What is the logical fallacy in assuming correlation implies causation?"
-        ],
-        "mathematical_reasoning": [
-            "How would you solve a quadratic equation step by step?",
-            "Explain the concept of mathematical induction."
-        ],
-        "creative_thinking": [
-            "How would you design a city on Mars?",
-            "What are some unique solutions to reduce plastic waste?"
-        ]
-    }
+    try:
+        questions = load_questions()
+    except Exception as e:
+        print(f"❌ Error loading questions: {e}")
+        return
     
-    # Load questions from previous runs or use defaults
-    questions = load_questions()
-    if not questions:
-        questions = default_questions
+    all_embeddings = []
+    categories = []
+    total_processed = 0
+    category_count = len(questions.items())
     
-    # Analyze pathways for each category
-    pathway_analyses = {}
-    for category, category_questions in questions.items():
-        pathway_analyses[category] = []
-        print(f"Analyzing {category} questions...")
-        for question in category_questions:
-            pathway_data = analyzer.analyze_pathway(question, category)
-            pathway_analyses[category].append(pathway_data)
-            
-            # Visualize each pathway as we go
-            analyzer.visualize_pathway(pathway_data)
+    print("\n🔍 Beginning category processing...")
+    for cat_idx, (category, category_questions) in enumerate(questions.items(), 1):
+        print(f"\n📂 Processing category {cat_idx}/{category_count}: {category} ({len(category_questions)} questions)")
+        
+        for q_idx, question in enumerate(category_questions, 1):
+            try:
+                print(f"   🔎 Analyzing question {q_idx}/{len(category_questions)}: {question[:50]}...")
+                embeddings = analyzer.get_thought_embeddings(question)
+                analyzer.visualize_thought_space(embeddings, category)
+                all_embeddings.append(embeddings)
+                categories.append(category)
+                total_processed += 1
+            except Exception as e:
+                print(f"   ❗ Error processing question: {question[:50]}... ({e})")
     
-    # Compare pathways between categories
-    categories = list(questions.keys())
-    for i in range(len(categories)):
-        for j in range(i + 1, len(categories)):
-            cat1, cat2 = categories[i], categories[j]
-            print(f"\nComparing {cat1} vs {cat2}:")
-            comparison = analyzer.compare_pathways(cat1, cat2)
-            print(json.dumps(comparison, indent=2))
+    print("\n📊 Creating visualizations...")
+    if all_embeddings:
+        print(f"🧩 Combining {len(all_embeddings)} question embeddings")
+        combined_embeddings = np.concatenate(all_embeddings)
+        analyzer.visualize_thought_space(combined_embeddings, "All_Categories")
+        print(f"📈 Saved combined visualization: thought_trajectory_All_Categories.png")
+    else:
+        print("⚠️ No valid embeddings generated - nothing to visualize")
     
-    # Save results
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = pathlib.Path("pathway_results") / timestamp
-    results_dir.mkdir(parents=True, exist_ok=True)
-    
-    with open(results_dir / "pathway_analyses.json", 'w') as f:
-        json.dump(pathway_analyses, f, indent=2)
-    
-    print(f"\nResults saved to {results_dir}")
+    print(f"\n✅ Analysis complete! Processed {total_processed} questions across {category_count} categories")
 
 if __name__ == "__main__":
     main()
 
 # Initialize tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")
-model = AutoModelForCausalLM.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+model = AutoModelForCausalLM.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", device_map="auto")
 
 # Create the pipeline
 pipe = pipeline(
