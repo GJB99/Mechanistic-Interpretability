@@ -15,9 +15,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
 from umap import UMAP
+import re
 
 class ModelPathwayAnalyzer:
-    def __init__(self, model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"):
+    def __init__(self, model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"):
         print(f"\n🔧 Initializing analyzer with model: {model_name}")
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -30,24 +31,34 @@ class ModelPathwayAnalyzer:
         """Register hooks to capture layer activations efficiently"""
         print("🔌 Registering activation hooks...")
         
-        def hook_fn(module, input, output, layer_idx):
-            self.activation_cache[layer_idx] = output[0].mean(dim=1).detach().cpu()
-        
-        # Register hooks only on every 4th layer to reduce computation
+        def create_hook(layer_idx):
+            def hook_fn(module, inputs, outputs):
+                if isinstance(outputs, tuple):
+                    activation = outputs[0]
+                else:
+                    activation = outputs
+                self.activation_cache[layer_idx] = activation.mean(dim=1).detach().cpu()
+            return hook_fn
+
         self.selected_layers = []
-        for idx, (name, module) in enumerate(self.model.named_modules()):
-            if "layers" in name and idx % 4 == 0:
-                self.selected_layers.append(name)
-                module.register_forward_hook(
-                    lambda m, i, o, idx=idx: hook_fn(m, i, o, idx//4)
-                )
+        layer_counter = 0
         
-        self.activation_cache = [None] * len(self.selected_layers)
-        print(f"📡 Registered hooks on {len(self.selected_layers)} layers")
+        # Only hook the main transformer layers (model.layers.0, model.layers.1, etc.)
+        for name, module in self.model.named_modules():
+            if re.match(r"model\.layers\.\d+$", name):  # Match exact layer modules
+                print(f"🔗 Hooking layer {layer_counter}: {name}")
+                module.register_forward_hook(create_hook(layer_counter))
+                self.selected_layers.append(name)
+                layer_counter += 1
+        
+        # Initialize cache with exact layer count
+        self.activation_cache = [None] * layer_counter
+        print(f"📡 Registered hooks on {layer_counter} main transformer layers")
 
     def get_thought_embeddings(self, question: str) -> np.ndarray:
         """Get layer-wise activations as thought trajectory"""
-        self.activation_cache = [None] * len(self.selected_layers)
+        # Reset cache with proper initialization
+        self.activation_cache = [None] * len(self.activation_cache)
         
         messages = [{"role": "user", "content": question}]
         prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -56,13 +67,19 @@ class ModelPathwayAnalyzer:
         with torch.no_grad():
             _ = self.model(**inputs)
         
-        # Stack layer activations into a thought trajectory
+        # Verify all activations were captured
+        if any(x is None for x in self.activation_cache):
+            raise ValueError(f"Missing activations in {self.activation_cache.count(None)} layers")
+            
         return torch.stack(self.activation_cache).numpy()
 
     def visualize_thought_space(self, embeddings: np.ndarray, category: str):
         """Visualize activations using UMAP"""
         print(f"🎨 Generating visualization for {category}...")
-        from umap import UMAP
+        
+        # Remove batch dimension and layer-wise concatenation
+        if embeddings.ndim == 3:
+            embeddings = embeddings.squeeze(1)  # Shape: (layers, hidden_dim)
         
         # Reduce dimensionality
         reducer = UMAP(n_components=2, random_state=42)
@@ -151,7 +168,7 @@ pipe = pipeline(
     "text-generation",
     model=model,
     tokenizer=tokenizer,
-    max_new_tokens=512,  # Adjust based on your needs
+    max_new_tokens=512,  
     do_sample=True,      # Enable sampling
     temperature=0.6,     # Recommended between 0.5-0.7 per docs
     top_p=0.95          # Default value from docs
