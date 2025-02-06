@@ -34,6 +34,7 @@ The 15 cognitive categories and their focus areas:
 Some results: ![thought_trajectory_All_Categories](https://github.com/user-attachments/assets/3ba875c1-b5ae-470a-ab0a-854cf0436da5)
 ![enhanced_analysis](https://github.com/user-attachments/assets/15696c94-af62-4ac4-8fd3-8b6fae1a1be0)
 
+For 3D interactive results go to https://github.com/GJB99/Mechanistic-Interpretability/blob/new-main/results/24-01-2025-20-07-56/cognitive_trajectories_3d.html and download the file to interact.
 
 ## Key Features
 
