@@ -31,7 +31,9 @@ The 15 cognitive categories and their focus areas:
 3. **Dimensionality Reduction**: UMAP projection to 2D space
 4. **Visualization**: Color-coded trajectory plots showing layer progression
 
-![Example Visualization](thought_trajectory_Vision.png)
+Some results: ![thought_trajectory_All_Categories](https://github.com/user-attachments/assets/3ba875c1-b5ae-470a-ab0a-854cf0436da5)
+![enhanced_analysis](https://github.com/user-attachments/assets/15696c94-af62-4ac4-8fd3-8b6fae1a1be0)
+
 
 ## Key Features
 
